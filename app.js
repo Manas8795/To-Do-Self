@@ -46,7 +46,12 @@ initPwaInstall();
 void initApp();
 
 async function initApp() {
-  await initSupabase();
+  if (!supabaseClient) {
+    await initSupabase();
+  }
+  if (supabaseClient) {
+    await loadTodosFromSupabase();
+  }
   autoShiftOverdueTasks();
   render();
 }
@@ -129,24 +134,16 @@ function bindUiEvents() {
 
 async function initSupabase() {
   if (!window.supabase?.createClient || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    // No Supabase: fall back to local storage
-    todos = loadTodosLocal();
+    console.error("Supabase not configured");
     return;
   }
 
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  
-  try {
-    await loadTodosFromSupabase();
-  } catch (error) {
-    console.error("Failed to load from Supabase, falling back to local:", error);
-    todos = loadTodosLocal();
-  }
 
-  // Lightweight pull for cross-device updates every 10 seconds.
+  // Lightweight pull for cross-device updates every 5 seconds.
   pullTimer = setInterval(() => {
     void loadTodosFromSupabase(false);
-  }, 10000);
+  }, 5000);
 }
 
 function render() {
@@ -252,7 +249,6 @@ function getDayScopeTodos() {
 }
 
 function saveTodos() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
   void syncTodosToSupabase();
 }
 
@@ -278,30 +274,27 @@ async function syncTodosToSupabase() {
       created_at: new Date(todo.createdAt).toISOString(),
     }));
 
+    // Upsert all current todos
     if (rows.length > 0) {
       const { error } = await supabaseClient
         .from("todos")
         .upsert(rows, { onConflict: "id" });
       if (error) {
-        console.error("Supabase sync upsert failed:", error.message);
+        console.error("Supabase sync failed:", error.message);
         return;
       }
     }
 
-    // Best-effort cleanup for deleted local tasks.
-    try {
-      if (rows.length === 0) {
-        await supabaseClient.from("todos").delete().neq("id", "");
-      } else {
-        const ids = rows.map((row) => row.id);
-        await supabaseClient
-          .from("todos")
-          .delete()
-          .not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`);
-      }
-    } catch {
-      // ignore cleanup errors
+    // Delete tasks that no longer exist locally
+    const ids = rows.map((row) => row.id);
+    if (ids.length === 0) {
+      await supabaseClient.from("todos").delete().neq("id", "");
+    } else {
+      const placeholders = ids.map((_, i) => `$${i + 1}`).join(",");
+      await supabaseClient.from("todos").delete().not("id", "in", `(${ids.join(",")})`);
     }
+  } catch (error) {
+    console.error("Sync error:", error);
   } finally {
     syncInFlight = false;
     if (syncQueued) {
@@ -311,7 +304,7 @@ async function syncTodosToSupabase() {
   }
 }
 
-async function loadTodosFromSupabase(overwriteLocal = true) {
+async function loadTodosFromSupabase(isPolling = false) {
   if (!supabaseClient) return;
   const { data, error } = await supabaseClient
     .from("todos")
@@ -325,8 +318,8 @@ async function loadTodosFromSupabase(overwriteLocal = true) {
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
   
-  if (!overwriteLocal) {
-    // Pull mode: merge cloud changes with local state
+  if (isPolling) {
+    // Polling mode: merge cloud changes with local state
     const localMap = new Map(todos.map(t => [t.id, t]));
     const cloudMap = new Map(cloudTodos.map(t => [t.id, t]));
     
@@ -360,35 +353,17 @@ async function loadTodosFromSupabase(overwriteLocal = true) {
     }
     
     if (changed) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
       autoShiftOverdueTasks();
       render();
     }
-    return;
-  }
-
-  // Initial load: cloud data takes priority if it exists
-  if (cloudTodos.length > 0) {
-    todos = cloudTodos;
   } else {
-    // No cloud data: load from local
-    todos = loadTodosLocal();
+    // Initial load: database is single source of truth
+    todos = cloudTodos;
+    autoShiftOverdueTasks();
   }
-  
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-  autoShiftOverdueTasks();
 }
 
-function loadTodosLocal() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed = JSON.parse(raw ?? "[]");
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((item) => normalizeTodo(item));
-  } catch {
-    return [];
-  }
-}
+
 
 function normalizeTodo(item) {
   const createdAtRaw = item.createdAt ?? item.created_at;
