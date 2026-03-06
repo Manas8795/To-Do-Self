@@ -140,9 +140,9 @@ async function initSupabase() {
 
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  // Lightweight pull for cross-device updates every 5 seconds.
+  // Lightweight pull for cross-device updates every 5 seconds (merge mode).
   pullTimer = setInterval(() => {
-    void loadTodosFromSupabase(false);
+    void loadTodosFromSupabase(true);
   }, 5000);
 }
 
